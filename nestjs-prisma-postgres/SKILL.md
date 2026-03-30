@@ -270,12 +270,17 @@ Créer ensuite manuellement :
 
 ```
 src/auth/
+  dto/
+    register.dto.ts    ← RegisterDto avec class-validator
+    login.dto.ts       ← LoginDto avec class-validator
   auth.guard.ts        ← guard JWT + logique @Public()
   auth.module.ts       ← JwtModule + APP_GUARD global
   auth.controller.ts   ← POST /auth/register, POST /auth/login, GET /auth/profile
   auth.service.ts      ← register + signIn avec Prisma + bcrypt
   public.decorator.ts  ← décorateur @Public()
 ```
+
+> **Toujours** créer un dossier `dto/` dans le module auth — jamais de types inline `{ email: string; password: string }` dans les paramètres `@Body()` du controller.
 
 ### Prisma schema — modèle User
 
@@ -387,12 +392,37 @@ export class AuthService {
 }
 ```
 
+### `src/auth/dto/register.dto.ts`
+
+```typescript
+import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+
+export class RegisterDto {
+  @IsEmail() email: string;
+  @IsString() @MinLength(6) password: string;
+  @IsString() @IsNotEmpty() name: string;
+}
+```
+
+### `src/auth/dto/login.dto.ts`
+
+```typescript
+import { IsEmail, IsString, MinLength } from 'class-validator';
+
+export class LoginDto {
+  @IsEmail() email: string;
+  @IsString() @MinLength(6) password: string;
+}
+```
+
 ### `src/auth/auth.controller.ts`
 
 ```typescript
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Request } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
+import { RegisterDto } from './dto/register.dto';
+import { LoginDto } from './dto/login.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -400,15 +430,15 @@ export class AuthController {
 
   @Public()
   @Post('register')
-  register(@Body() body: { email: string; password: string; name: string }) {
-    return this.authService.register(body.email, body.password, body.name);
+  register(@Body() dto: RegisterDto) {
+    return this.authService.register(dto.email, dto.password, dto.name);
   }
 
   @Public()
   @HttpCode(HttpStatus.OK)
   @Post('login')
-  signIn(@Body() body: { email: string; password: string }) {
-    return this.authService.signIn(body.email, body.password);
+  signIn(@Body() dto: LoginDto) {
+    return this.authService.signIn(dto.email, dto.password);
   }
 
   @Get('profile')
@@ -482,6 +512,72 @@ const hash = await bcrypt.hash(plainText, 10);        // à la création
 const match = await bcrypt.compare(plainText, hash);  // à la connexion
 ```
 
+## Health Check (Terminus)
+
+**Toujours créer un endpoint `/api/health` avec `@nestjs/terminus` — fait pro et utile en prod/exam.**
+
+### Installation
+
+```bash
+npm install @nestjs/terminus
+nest g module health --no-spec
+nest g controller health --no-spec
+```
+
+### `src/health/health.module.ts`
+
+```typescript
+import { Module } from '@nestjs/common';
+import { TerminusModule } from '@nestjs/terminus';
+import { HealthController } from './health.controller';
+
+@Module({
+  imports: [TerminusModule],
+  controllers: [HealthController],
+})
+export class HealthModule {}
+```
+
+### `src/health/health.controller.ts`
+
+Utilise `PrismaHealthIndicator` pour vérifier que la DB est up :
+
+```typescript
+import { Controller, Get } from '@nestjs/common';
+import { HealthCheck, HealthCheckService, PrismaHealthIndicator } from '@nestjs/terminus';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Controller('health')
+export class HealthController {
+  constructor(
+    private health: HealthCheckService,
+    private prismaHealth: PrismaHealthIndicator,
+    private prisma: PrismaService,
+  ) {}
+
+  @Get()
+  @HealthCheck()
+  check() {
+    return this.health.check([
+      () => this.prismaHealth.pingCheck('database', this.prisma),
+    ]);
+  }
+}
+```
+
+### Réponse attendue — `GET /api/health`
+
+```json
+{
+  "status": "ok",
+  "info": { "database": { "status": "up" } },
+  "error": {},
+  "details": { "database": { "status": "up" } }
+}
+```
+
+Si la DB est down → HTTP 503 automatiquement.
+
 ## Commandes essentielles
 
 ```bash
@@ -505,14 +601,91 @@ npm run start:dev                      # hot-reload
 - **ALWAYS** importer les types Prisma depuis `generated/prisma/client` — jamais depuis `@prisma/client`
 - **NEVER** skip `npx prisma generate` après un changement de schema
 - **ALWAYS** scaffolder auth avec `nest g module/controller/service auth --no-spec` — jamais à la main
+- **ALWAYS** créer un dossier `dto/` dans `src/auth/` avec `RegisterDto` et `LoginDto` — jamais de types inline `{ email: string; ... }` dans `@Body()`
 - **ALWAYS** mettre `APP_GUARD` dans `AuthModule` (pas `AppModule`) avec `useClass: AuthGuard`
 - **ALWAYS** marquer les routes publiques avec `@Public()` — jamais retirer le guard
 - **NEVER** importer `AuthModule` dans `AppModule` manuellement — le CLI le fait automatiquement
 - **ALWAYS** mettre `auth.guard.ts` et `public.decorator.ts` à plat dans `src/auth/` — pas de sous-dossiers
 - **NEVER** stocker un mot de passe en clair — toujours `bcrypt.hash(password, 10)`
 - **NEVER** mettre `JWT_SECRET` en dur dans le code — toujours via `.env` + `ConfigService`
+- **ALWAYS** mettre `import 'dotenv/config'` comme **toute première ligne** de `main.ts` — sinon `DATABASE_URL` est undefined au démarrage → crash SASL
+- **NEVER** utiliser `ts-node` pour les scripts seed — toujours `tsx` (ts-node ne résout pas les `.js` dans les fichiers générés avec `moduleFormat = "cjs"`)
+- **NEVER** créer un seed (`prisma/seed.ts`) sans que l'utilisateur le demande explicitement
+- **ALWAYS** créer un endpoint `/health` avec `@nestjs/terminus` + `PrismaHealthIndicator` dans tout nouveau projet
+
+## Seed Prisma
+
+Installer `tsx` pour exécuter le seed (ts-node est incompatible avec `moduleFormat = "cjs"`) :
+
+```bash
+npm install tsx --save-dev
+```
+
+Ajouter dans `package.json` :
+```json
+"scripts": {
+  "seed": "tsx prisma/seed.ts"
+},
+"prisma": {
+  "seed": "npm run seed"
+}
+```
+
+`prisma/seed.ts` :
+```typescript
+import { PrismaClient } from '../src/generated/prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import 'dotenv/config';
+
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL as string });
+const prisma = new PrismaClient({ adapter });
+
+async function main() {
+  // ... données
+}
+
+main()
+  .catch(console.error)
+  .finally(() => prisma.$disconnect());
+```
+
+```bash
+npm run seed
+```
+
+> **NEVER** utiliser `ts-node` pour le seed — utiliser `tsx` uniquement.
 
 ## Troubleshooting
+
+### `SASL: client password must be a string` au démarrage
+
+```
+Error: SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string
+```
+
+**Cause** : `dotenv/config` n'est pas importé en premier dans `main.ts` — `DATABASE_URL` est `undefined` quand PrismaService s'instancie.
+**Fix** : ajouter `import 'dotenv/config'` comme **toute première ligne** de `main.ts`, avant tout autre import.
+
+```typescript
+import 'dotenv/config'; // ← DOIT être la première ligne
+import { NestFactory } from '@nestjs/core';
+// ...
+```
+
+### `Cannot find module './internal/class.js'` dans le seed
+
+```
+Error: Cannot find module './internal/class.js'
+Require stack: [.../generated/prisma/client.ts, .../seed.ts]
+```
+
+**Cause** : `ts-node` ne résout pas les imports `.js` dans les fichiers TypeScript générés par Prisma avec `moduleFormat = "cjs"`.
+**Fix** : utiliser `tsx` à la place de `ts-node` pour exécuter le seed.
+
+```bash
+npm install tsx --save-dev
+# package.json → "seed": "tsx prisma/seed.ts"
+```
 
 ### `exports is not defined` au démarrage
 
