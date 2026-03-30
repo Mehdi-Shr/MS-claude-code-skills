@@ -85,14 +85,16 @@ bootstrap();
 
 ```typescript
 // src/prisma/prisma.service.ts
-import { Injectable } from '@nestjs/common';
-import { PrismaClient } from '../generated/prisma';
-import { PrismaPg } from '@prisma/adapter-pg';
+import { Injectable } from "@nestjs/common";
+import { PrismaClient } from "./generated/prisma/client.js";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 @Injectable()
 export class PrismaService extends PrismaClient {
   constructor() {
-    const adapter = new PrismaPg({ url: process.env.DATABASE_URL });
+    const adapter = new PrismaPg({
+      connectionString: process.env.DATABASE_URL as string,
+    });
     super({ adapter });
   }
 }
@@ -136,14 +138,16 @@ src/users/
 ### Étape 1b — Créer prisma.config.ts (à la racine du projet)
 
 ```typescript
-import path from 'node:path';
-import { defineConfig, env } from 'prisma/config';
 import 'dotenv/config';
+import { defineConfig } from 'prisma/config';
 
 export default defineConfig({
-  schema: path.join('prisma', 'schema.prisma'),
+  schema: 'prisma/schema.prisma',
+  migrations: {
+    path: 'prisma/migrations',
+  },
   datasource: {
-    url: env('DATABASE_URL'), // lit DATABASE_URL depuis .env
+    url: process.env['DATABASE_URL'],
   },
 });
 ```
@@ -200,7 +204,7 @@ export class UpdateUserDto extends PartialType(CreateUserDto) {}
 // src/users/users.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { User, Prisma } from '../../generated/prisma';
+import { User, Prisma } from '../../generated/prisma/client';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
@@ -516,7 +520,7 @@ npm run start:dev                      # hot-reload
 - **NEVER** injecter `PrismaClient` directement — toujours via `PrismaService`
 - **NEVER** mettre de logique métier dans les controllers — services uniquement
 - **ALWAYS** inclure `generator client` avec `output`, `moduleFormat = "cjs"` dans le schema — requis pour NestJS (CommonJS)
-- **ALWAYS** importer les types Prisma depuis `generated/prisma` — jamais depuis `@prisma/client`
+- **ALWAYS** importer les types Prisma depuis `generated/prisma/client` — jamais depuis `@prisma/client`
 - **NEVER** skip `npx prisma generate` après un changement de schema
 - **ALWAYS** utiliser `APP_GUARD` + `JwtAuthGuard` global — pas de `@UseGuards` partout
 - **ALWAYS** marquer les routes publiques avec `@Public()` — jamais retirer le guard

@@ -79,8 +79,8 @@ npx @nestjs/cli@latest new backend --package-manager npm --skip-git
 cd backend
 
 # Dépendances Prisma + validation
-npm install prisma --save-dev
-npm install @prisma/client @prisma/adapter-pg
+npm install prisma @types/node @types/pg --save-dev
+npm install @prisma/client @prisma/adapter-pg pg dotenv
 npm install class-validator class-transformer @nestjs/mapped-types
 
 # Initialiser Prisma
@@ -146,13 +146,13 @@ Créer `backend/src/prisma/prisma.service.ts` :
 
 ```typescript
 import { Injectable } from '@nestjs/common';
-import { PrismaClient } from '../generated/prisma';
+import { PrismaClient } from '../generated/prisma/client.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 @Injectable()
 export class PrismaService extends PrismaClient {
   constructor() {
-    const adapter = new PrismaPg({ url: process.env.DATABASE_URL });
+    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL as string });
     super({ adapter });
   }
 }
