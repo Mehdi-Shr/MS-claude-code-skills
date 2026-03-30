@@ -121,7 +121,8 @@ Importer `PrismaModule` **une seule fois** dans `AppModule`. Jamais dans les mod
 
 ```bash
 # Depuis backend/
-npx nest g resource <name> # → choisir : REST API → Yes (CRUD entry points)
+npx nest g resource <name> --no-spec
+# → choisir : REST API → Yes (CRUD entry points)
 ```
 
 Génère automatiquement :
@@ -254,7 +255,10 @@ npm install --save-dev @types/bcrypt
 ### Scaffolding avec le CLI
 
 ```bash
-nest g module auth nest g controller auth nest g service auth ```
+nest g module auth --no-spec
+nest g controller auth --no-spec
+nest g service auth --no-spec
+```
 
 Crée `src/auth/` avec module, controller, service. Ajoute automatiquement `AuthModule` dans `AppModule`.
 
