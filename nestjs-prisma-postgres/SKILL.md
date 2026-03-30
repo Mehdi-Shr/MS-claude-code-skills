@@ -67,6 +67,7 @@ docker-compose up -d
 ## main.ts (configuration globale)
 
 ```typescript
+import 'dotenv/config'; // ← TOUJOURS en premier — charge le .env avant NestJS
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
@@ -251,22 +252,50 @@ npm install @nestjs/jwt bcrypt
 npm install --save-dev @types/bcrypt
 ```
 
-### Structure
+### Scaffolding avec le CLI
+
+```bash
+nest g module auth --no-spec
+nest g controller auth --no-spec
+nest g service auth --no-spec
+```
+
+Crée `src/auth/` avec module, controller, service. Ajoute automatiquement `AuthModule` dans `AppModule`.
+
+Créer ensuite manuellement :
+- `src/auth/auth.guard.ts`
+- `src/auth/public.decorator.ts`
+
+### Structure finale
 
 ```
 src/auth/
-  guards/
-    auth.guard.ts
-  decorators/
-    public.decorator.ts
-    current-user.decorator.ts
-    roles.decorator.ts
-  auth.module.ts
-  auth.service.ts
-  auth.controller.ts
+  auth.guard.ts        ← guard JWT + logique @Public()
+  auth.module.ts       ← JwtModule + APP_GUARD global
+  auth.controller.ts   ← POST /auth/register, POST /auth/login, GET /auth/profile
+  auth.service.ts      ← register + signIn avec Prisma + bcrypt
+  public.decorator.ts  ← décorateur @Public()
 ```
 
-### `src/auth/decorators/public.decorator.ts`
+### Prisma schema — modèle User
+
+```prisma
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  password  String
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+}
+```
+
+```bash
+npx prisma migrate dev --name add-user
+npx prisma generate
+```
+
+### `src/auth/public.decorator.ts`
 
 ```typescript
 import { SetMetadata } from '@nestjs/common';
@@ -275,28 +304,7 @@ export const IS_PUBLIC_KEY = 'isPublic';
 export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
 ```
 
-### `src/auth/decorators/current-user.decorator.ts`
-
-```typescript
-import { createParamDecorator, ExecutionContext } from '@nestjs/common';
-
-export const CurrentUser = createParamDecorator(
-  (data: unknown, ctx: ExecutionContext) => {
-    const request = ctx.switchToHttp().getRequest();
-    return request.user;
-  },
-);
-```
-
-### `src/auth/decorators/roles.decorator.ts`
-
-```typescript
-import { Reflector } from '@nestjs/core';
-
-export const Roles = Reflector.createDecorator<string[]>();
-```
-
-### `src/auth/guards/auth.guard.ts`
+### `src/auth/auth.guard.ts`
 
 ```typescript
 import {
@@ -308,7 +316,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
-import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { IS_PUBLIC_KEY } from './public.decorator';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -318,19 +326,21 @@ export class AuthGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    // 1. Route @Public() ? → laisser passer sans vérifier le token
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
     if (isPublic) return true;
 
+    // 2. Extraire et vérifier le token JWT
     const request = context.switchToHttp().getRequest();
     const token = this.extractTokenFromHeader(request);
     if (!token) throw new UnauthorizedException();
 
     try {
       const payload = await this.jwtService.verifyAsync(token);
-      request['user'] = payload;
+      request['user'] = payload; // { sub, email, iat, exp }
     } catch {
       throw new UnauthorizedException();
     }
@@ -349,7 +359,7 @@ export class AuthGuard implements CanActivate {
 ```typescript
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService } from 'src/prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
@@ -359,21 +369,20 @@ export class AuthService {
     private jwtService: JwtService,
   ) {}
 
-  async signIn(email: string, password: string): Promise<{ access_token: string }> {
-    const user = await this.prisma.user.findUnique({ where: { email } });
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      throw new UnauthorizedException();
-    }
-    const { password: _, ...result } = user;
-    const payload = { sub: user.id, email: user.email };
-    return { access_token: await this.jwtService.signAsync(payload) };
-  }
-
   async register(email: string, password: string, name: string) {
     const hashed = await bcrypt.hash(password, 10);
     return this.prisma.user.create({
       data: { email, password: hashed, name },
     });
+  }
+
+  async signIn(email: string, pass: string): Promise<{ access_token: string }> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user || !(await bcrypt.compare(pass, user.password))) {
+      throw new UnauthorizedException();
+    }
+    const payload = { sub: user.id, email: user.email };
+    return { access_token: await this.jwtService.signAsync(payload) };
   }
 }
 ```
@@ -383,8 +392,7 @@ export class AuthService {
 ```typescript
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Request } from '@nestjs/common';
 import { AuthService } from './auth.service';
-import { Public } from './decorators/public.decorator';
-import { CurrentUser } from './decorators/current-user.decorator';
+import { Public } from './public.decorator';
 
 @Controller('auth')
 export class AuthController {
@@ -403,20 +411,24 @@ export class AuthController {
     return this.authService.signIn(body.email, body.password);
   }
 
-  @Get('me')
-  getMe(@CurrentUser() user) {
-    return user; // { sub, email, iat, exp }
+  @Get('profile')
+  getProfile(@Request() req: any) {
+    return req.user; // { sub, email, iat, exp }
   }
 }
 ```
 
-### `src/auth/auth.module.ts`
+### `src/auth/auth.module.ts` — APP_GUARD global
+
+`APP_GUARD` enregistre le guard **globalement** : NestJS l'applique à toutes les routes sans `@UseGuards()` partout.
 
 ```typescript
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { JwtModule } from '@nestjs/jwt';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
-import { JwtModule } from '@nestjs/jwt';
+import { AuthGuard } from './auth.guard';
 
 @Module({
   imports: [
@@ -426,56 +438,39 @@ import { JwtModule } from '@nestjs/jwt';
       signOptions: { expiresIn: '7d' },
     }),
   ],
-  providers: [AuthService],
+  providers: [
+    AuthService,
+    {
+      provide: APP_GUARD,
+      useClass: AuthGuard, // protège toute l'app par défaut
+    },
+  ],
   controllers: [AuthController],
-  exports: [AuthService],
 })
 export class AuthModule {}
 ```
 
-### `src/app.module.ts` — guard global
-
-```typescript
-import { Module } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
-import { AuthModule } from './auth/auth.module';
-import { PrismaModule } from './prisma/prisma.module';
-import { AuthGuard } from './auth/guards/auth.guard';
-
-@Module({
-  imports: [
-    PrismaModule,
-    AuthModule,
-    // ... autres modules
-  ],
-  providers: [
-    {
-      provide: APP_GUARD,
-      useClass: AuthGuard, // toutes les routes protégées par défaut
-    },
-  ],
-})
-export class AppModule {}
-```
-
-### Utilisation
+### Protéger/exposer des routes
 
 ```typescript
 // Route publique — pas de token requis
 @Public()
-@Get('public')
-publicRoute() { ... }
+@Get()
+findAll() { ... }
 
 // Route protégée — token JWT requis (comportement par défaut)
 @Get('profile')
-getProfile(@CurrentUser() user) {
-  return user; // { sub, email, iat, exp }
+getProfile(@Request() req: any) {
+  return req.user; // { sub, email, iat, exp }
 }
+```
 
-// Route avec rôle
-@Roles(['admin'])
-@Get('admin')
-adminOnly() { ... }
+### Utiliser le token dans les requêtes
+
+```
+POST /auth/login  →  { "access_token": "eyJ..." }
+
+Authorization: Bearer eyJ...   ← header à envoyer sur les routes protégées
 ```
 
 ### Hashing mot de passe
@@ -485,19 +480,6 @@ import * as bcrypt from 'bcrypt';
 
 const hash = await bcrypt.hash(plainText, 10);        // à la création
 const match = await bcrypt.compare(plainText, hash);  // à la connexion
-```
-
-### Prisma schema — ajouter le champ password
-
-```prisma
-model User {
-  id        Int      @id @default(autoincrement())
-  email     String   @unique
-  password  String
-  name      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
 ```
 
 ## Commandes essentielles
@@ -522,10 +504,38 @@ npm run start:dev                      # hot-reload
 - **ALWAYS** inclure `generator client` avec `output`, `moduleFormat = "cjs"` dans le schema — requis pour NestJS (CommonJS)
 - **ALWAYS** importer les types Prisma depuis `generated/prisma/client` — jamais depuis `@prisma/client`
 - **NEVER** skip `npx prisma generate` après un changement de schema
-- **ALWAYS** utiliser `APP_GUARD` + `JwtAuthGuard` global — pas de `@UseGuards` partout
+- **ALWAYS** scaffolder auth avec `nest g module/controller/service auth --no-spec` — jamais à la main
+- **ALWAYS** mettre `APP_GUARD` dans `AuthModule` (pas `AppModule`) avec `useClass: AuthGuard`
 - **ALWAYS** marquer les routes publiques avec `@Public()` — jamais retirer le guard
+- **NEVER** importer `AuthModule` dans `AppModule` manuellement — le CLI le fait automatiquement
+- **ALWAYS** mettre `auth.guard.ts` et `public.decorator.ts` à plat dans `src/auth/` — pas de sous-dossiers
 - **NEVER** stocker un mot de passe en clair — toujours `bcrypt.hash(password, 10)`
 - **NEVER** mettre `JWT_SECRET` en dur dans le code — toujours via `.env` + `ConfigService`
+
+## Troubleshooting
+
+### `exports is not defined` au démarrage
+
+```
+ReferenceError: exports is not defined
+    at file:///...dist/src/generated/prisma/client.js
+```
+
+**Cause** : le client Prisma est généré en ESM mais NestJS tourne en CommonJS.
+**Fix** : ajouter `moduleFormat = "cjs"` dans le generator, puis `npx prisma generate`.
+
+```prisma
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"   # ← obligatoire avec NestJS
+}
+```
+
+### `Cannot find module '../src/generated/prisma'`
+
+**Cause** : le client n'a pas encore été généré, ou l'import pointe vers le dossier au lieu du fichier.
+**Fix** : `npx prisma generate` puis importer depuis `../src/generated/prisma/client`.
 
 ## References
 
